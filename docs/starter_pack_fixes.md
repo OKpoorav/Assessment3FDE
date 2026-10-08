@@ -1,0 +1,14 @@
+# Starter-pack issues found and fixed
+
+The brief notes that the starter code is a scaffold that may contain problems. `verify_setup.py` and the starter tests passed on the untouched pack, so none of the problems below show up in pre-flight. Each one was found while building or running the product.
+
+| # | Where | Problem | Effect | Fix |
+|---|---|---|---|---|
+| 1 | `evals/run_public_evals.py` | Calls `handle_request` but never starts or health-checks the mock vendor-risk API. It works only if `run_local.py` is still running in another terminal. | If it isn't, every vendor lookup fails silently. Every case then looks like a vendor outage: PUB-01 fails on `vendor_risk_unavailable` and all routing is wrong. | `src/mock_server.ensure_mock_api()` starts the mock in-process when the default local URL is unreachable. Both eval runners and `run_copilot` call it. Set `MOCK_API_AUTOSTART=0` to test real outages. |
+| 2 | `.gitignore` | `evals/results_*.csv` was ignored. | The required "reproducible evaluation results" would never be committed. | Results are written to `evals/results/` and committed. |
+| 3 | `run_local.py` | Streamlit was launched without `--server.headless true`. | On a first run Streamlit asks for an e-mail address on stdin, so the UI subprocess hangs and never serves. | Added headless mode and disabled telemetry prompts. |
+| 4 | `src/data_access.py` | pandas `read_csv` turns blank cells (no review date, no manager) into float `NaN`. | `NaN` is truthy, fails `json.dumps` and breaks date parsing. A missing review date can look like a present value. | Replaced with a typed `csv` loader that maps blanks to `None`, plus a `DataStore` that supports scenario overrides. |
+| 5 | `src/vendor_client.py` | Raised raw `requests` exceptions and treated 404 and 503 the same way. | Callers had to catch transport errors, and "no record" could not be told apart from "service down". | Returns a typed result (`ok` / `not_found` / `unavailable`) with a timeout and one retry on 5xx or connection errors. It never raises. |
+| 6 | `mock_api/app.py` | Called `unquote()` on a path parameter that FastAPI had already decoded. | Vendor names containing `%` were double-decoded and looked up incorrectly. | Removed the second decode. |
+| 7 | `data/vendors.csv` vs. mock API (intentional data trap) | The SignalWatch registry row says `Approved` with review date 2025-07-01. The risk service says `expired`. | Trusting the registry would wrongly clear a production-access request. | The policy engine computes freshness itself (365 days from the policy reference date) and flags `conflicting_vendor_evidence` + `vendor_review_expired`. |
+| 8 | Date handling | Nothing in the scaffold pinned the reference date. | Checks using `date.today()` would drift. | `src/config.policy_reference_date()` parses the date from `procurement_policy.md`. |

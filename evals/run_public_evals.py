@@ -12,7 +12,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.contracts import ProcurementDecision
+from src.mock_server import ensure_mock_api
 from src.solution import handle_request
+from src.copilot import run_copilot
 
 
 def norm(value: object) -> str:
@@ -64,8 +66,13 @@ def evaluate(decision: ProcurementDecision, expectations: dict) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--architecture', choices=['single','staged'], default='single')
+    parser.add_argument('--architecture', choices=['single','staged','rules'], default='single')
     args = parser.parse_args()
+
+    # The starter runner never started the vendor-risk API, so every lookup failed and every
+    # case was evaluated as an outage. Start the local mock if it is not already running.
+    if not ensure_mock_api():
+        print("WARNING: vendor-risk API is not reachable; vendor checks will be reported as unavailable.")
 
     cases = json.loads((ROOT/'evals'/'public_cases.json').read_text(encoding='utf-8'))
     rows = []
@@ -74,7 +81,8 @@ def main() -> None:
     for case in cases:
         start = time.perf_counter()
         try:
-            raw = handle_request(case['request_id'], architecture=args.architecture)
+            raw = (run_copilot(case['request_id'], 'rules').decision if args.architecture == 'rules'
+                   else handle_request(case['request_id'], architecture=args.architecture))
             decision = raw if isinstance(raw, ProcurementDecision) else ProcurementDecision.model_validate(raw)
             latency_ms = (time.perf_counter() - start) * 1000
             failures = evaluate(decision, case['expectations'])
@@ -102,7 +110,8 @@ def main() -> None:
             })
 
     if rows:
-        out = ROOT/'evals'/f"results_{args.architecture}.csv"
+        out = ROOT/'evals'/'results'/f"public_{args.architecture}.csv"
+        out.parent.mkdir(parents=True, exist_ok=True)
         with out.open('w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=rows[0].keys())
             writer.writeheader(); writer.writerows(rows)

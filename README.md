@@ -1,163 +1,177 @@
-# FDE Assessment 3 Starter Pack
-## AI Procurement Request Copilot
+# AI Procurement Request Copilot
 
-This repository contains the **starter data, mock service, interface contract, optional UI scaffold, and public evaluation harness** for Assessment 3.
+An internal tool for reviewing software and service purchase requests. It gathers evidence with tools (requester, budget, existing software, vendor registry, external vendor-risk service), applies the procurement policy deterministically in code, and uses Claude to interpret the request and recommend the **next action**. Every decision stays with a human.
 
-> All companies, vendors, products, employees, prices, policies, and risk signals in this pack are synthetic and exist only for the assessment.
+Two architectures were built and evaluated on the same 22-case test set: **A, a single agent**, and **B, a staged analyst → reviewer pair**. **Decision: ship A.** The evidence is in [Evaluation results](#evaluation-results) and in the [decision memo](docs/decision_memo.md).
 
-## Your objective
+> All data is synthetic (FDE Assessment 3 starter pack).
 
-Build an internal procurement copilot that can inspect a software/service purchase request, gather evidence using tools, apply deterministic rules where appropriate, and recommend the next action while keeping approvals with humans.
-
-You are expected to build and evaluate:
-
-1. **Architecture A - Single-agent baseline**
-2. **Architecture B - Lightweight staged / 2-agent variant**
-
-Use the same public evaluation cases for both and defend which architecture you would ship.
-
-## What is already provided
-
-```text
-.
-├── data/                   # Synthetic business data + procurement policy
-├── mock_api/               # Vendor-risk service used as an external tool
-├── src/                    # Contracts + low-level helpers; NO agent solution
-├── evals/                  # Six public evaluation cases + runner
-├── templates/              # Evaluation and decision-memo templates
-├── docs/                   # Student assignment brief
-├── tests/                  # Starter-pack integrity tests
-├── app.py                  # Optional Streamlit UI scaffold
-├── run_local.py            # Starts mock API + optional UI
-└── verify_setup.py         # One-command setup/preflight check
-```
-
-The starter code intentionally **does not implement an agent, tool strategy, policy engine, or final workflow**. Those choices are part of the assessment.
-
-## Prerequisites
-
-- **Python 3.11 or 3.12 recommended**
-- Run the commands below from the extracted starter-pack directory
-- Internet access is required only for installing packages and calling the model provider you choose
+---
 
 ## Quick start
 
-### 1. Create an environment
-
-**macOS / Linux**
+Requires Python 3.11+.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+./start.sh            # creates .venv, installs deps, runs pre-flight, starts API + UI
 ```
 
-**Windows PowerShell**
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
-
-### 2. Verify the starter pack
+Or step by step:
 
 ```bash
-python verify_setup.py
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # add ANTHROPIC_API_KEY (optional; see below)
+python verify_setup.py        # pre-flight
+python run_local.py           # vendor-risk API :8001 + UI http://127.0.0.1:8501
 ```
 
-You should see `PRE-FLIGHT PASSED`. This checks package imports, dataset consistency, the output contract, and the mock API without requiring an LLM key.
+Without `ANTHROPIC_API_KEY`, the app still works in a labelled deterministic **rules-only** mode. Each decision then carries the flag `ai_assist_unavailable`.
 
-### 3. Add your LLM credentials
+| Command | What it does |
+|---|---|
+| `python -m pytest -q` | 60 unit/integration tests: policy engine, tools, guardrails, scripted agent loop, UI smoke test. No API key needed |
+| `python evals/run_public_evals.py --architecture single` / `staged` | Starter public harness (6 cases) |
+| `python evals/run_comparison.py` | Full comparison: 22 cases × {single, staged} × 3 repeats + rules baseline → `evals/results/` |
+| `python evals/run_comparison.py --architectures rules` | Free, deterministic run of the same test set |
 
-**macOS / Linux**
+The adapter required by the brief is `src/solution.py::handle_request(request_id, architecture)` (`"single"` or `"staged"`). It returns a `ProcurementDecision`.
 
-```bash
-cp .env.example .env
+## Product workflow
+
+1. **Request**: pick an existing request or fill in the *New request* form. The free text is shown verbatim and labelled untrusted.
+2. **Run analysis** with architecture A, B or rules-only.
+3. **Recommendation panel**: the category banner, the next step, required approvals (named approver, reason and policy section for each), risk flags with reasons, and missing information.
+4. **Evidence panel**: each finding with its source tool and ledger ID. Tabs show the full tool trace (inputs/outputs, caller, latency), the policy-engine output, the raw agent output before guardrails, and any guardrail interventions.
+5. **Human review**: the reviewer records *accept and route*, *return for information*, *reject* or *override* (rejections and overrides require a justification). Decisions go to an append-only audit log (`var/audit_log.jsonl`). The copilot never approves, purchases or edits budgets.
+
+Recommendation categories, in routing priority: `request_more_information` › `escalate_manual_review` › `budget_exception_review` › `route_for_specialist_review` › `redirect_to_existing_tool` › `route_for_approval`.
+
+## Architecture
+
+The full write-up with diagrams is in [docs/architecture.md](docs/architecture.md).
+
+```mermaid
+flowchart LR
+    R[Request<br/>untrusted] --> AG[Agent: A single / B analyst→reviewer]
+    AG <--> T[5 evidence tools + policy engine]
+    AG --> GR[Guardrails in code]
+    T --> GR
+    GR --> D[ProcurementDecision] --> H[Human review + audit log]
 ```
 
-**Windows PowerShell**
+**Design principle:** AI interprets and recommends, code enforces thresholds and checks, humans make sensitive decisions.
 
-```powershell
-Copy-Item .env.example .env
-```
+| AI (Claude) | Code (deterministic) | Human |
+|---|---|---|
+| Understand the need; judge whether an existing tool already covers it; spot subtle injection and vague justifications; write the recommendation and next step | Required fields, budget arithmetic, approval tiers, Security/Privacy/Legal triggers, 365-day review validity, registry-vs-API conflicts, injection regex, routing priority, grounding checks | Approve spend, run Security/Privacy/Legal reviews, budget exceptions, overrides |
 
-Add only the credentials required by the provider you choose. Never commit `.env`.
+### Tools (6; 5 deterministic + 1 external API)
 
-The starter pack does **not** force a particular LLM provider or agent framework. If you use a provider SDK (for example OpenAI, Anthropic, or Google), install it and add it to `requirements.txt` so your submission works from a clean environment.
+| Tool | Type | Source |
+|---|---|---|
+| `get_requester_profile` | deterministic | employees.csv (manager + department head via reporting line) |
+| `check_department_budget` | deterministic | department_budgets.csv |
+| `search_existing_software` | deterministic | software_catalog.csv + purchase_history.csv |
+| `get_vendor_registry_record` | deterministic | vendors.csv |
+| `get_vendor_risk_assessment` | external API | mock vendor-risk service (timeout, retry, typed failure) |
+| `evaluate_policy_rules` | deterministic engine | `src/policy_engine.py` |
 
-`.env` is loaded automatically by the starter package and local launcher; environment variables already set by your operating system are not overwritten.
+### Agents
 
-### 4. Start the local services
+- **A, single agent** (`src/agents/architectures.py::run_single_agent`): one Claude agent with all six tools. It typically makes three calls: parallel evidence calls, then the policy engine, then a strict-schema `submit_recommendation`.
+- **B, staged** (`run_staged`): the *Procurement Analyst* (five evidence tools) submits an evidence pack. Code then runs the policy engine. The *Policy/Risk Reviewer* (no data tools) checks the pack against the full tool results and submits the same schema.
 
-```bash
-python run_local.py
-```
+Both architectures go through the **same guardrail assembler** (`src/assembler.py`). Engine approvals and flags cannot be removed. Routing can only become more cautious, except for a judged redirect to an existing tool. Citations must resolve to ledger IDs, and numbers in a finding must appear in the cited tool output. Evidence the agent skipped is back-filled. Text claiming an approval or purchase is replaced. `human_review_required` is always true. If the LLM fails (API error, refusal, truncation, no submission), the run falls back to the deterministic decision.
 
-This starts:
-- Vendor risk API: `http://127.0.0.1:8001`
-- Optional starter UI: `http://127.0.0.1:8501`
-
-You may replace the UI scaffold with any framework.
-
-### 5. Implement the assessment adapter
-
-Implement:
+### Layout
 
 ```text
-src/solution.py -> handle_request(request_id, architecture)
+app.py                  Streamlit reviewer UI
+run_local.py / start.sh One-command start (mock API + UI)
+src/
+  solution.py           handle_request adapter (eval contract)
+  copilot.py            orchestration, evidence back-fill, LLM fallback, telemetry
+  tools.py              6 tools + evidence ledger
+  policy_engine.py      deterministic policy (§1-§11)
+  assembler.py          guardrails -> ProcurementDecision
+  agents/               prompts, strict output schemas, tool loop, A and B
+  llm.py                Anthropic client wrapper + usage accounting
+  vendor_client.py      typed vendor-risk client
+  data_access.py        typed CSV/JSON loader with scenario overrides
+  mock_server.py        auto-start for the mock API
+  audit.py              human decision log
+evals/
+  test_set.json         22 shared cases with expected outcomes
+  run_comparison.py     A vs B vs rules runner + scorer
+  run_public_evals.py   starter public harness (patched)
+  results/              committed results (summary.md, CSV, full traces)
+docs/
+  architecture.md       diagrams, tools, hand-offs, assumptions
+  decision_memo.md      architecture decision (<= 500 words)
+  starter_pack_fixes.md issues found in the scaffold and how they were fixed
+tests/                  pytest suite
 ```
 
-Your function must return an object compatible with `ProcurementDecision` in `src/contracts.py`.
+## Assumptions
 
-The adapter exists so the same evaluation harness can test different implementations. Your internal architecture can use any framework or design.
+See [docs/architecture.md#assumptions](docs/architecture.md#assumptions). The main ones:
 
-### 6. Run the public evaluations
+- Request amounts are annual. The approval tiers follow §4 exactly ($1,000 → Manager; $1,000.01 → Department Head + Procurement; and so on).
+- **Department Head** is the nearest Director/VP in the requester's reporting line.
+- The new-vendor Legal rule applies at **≥ $10,000**.
+- A security review is valid for 365 days from its review date, measured at the policy reference date **2026-09-30** (read from the policy file, never the system clock).
+- Overlap with a catalog product is always surfaced as a flag. Whether it blocks the purchase is the AI's judgment.
+- Integrations imply data classes (CRM → customer PII, Git → source code, production/cloud → production access). A stated class lower than the implied one is flagged as a mismatch.
+- "No record" at the risk service means the assessment is missing. Only a failed call counts as `vendor_risk_unavailable`.
 
-```bash
-python evals/run_public_evals.py --architecture single
-python evals/run_public_evals.py --architecture staged
-```
+## Evaluation results
 
-The runner checks the response schema and several minimum behavioral expectations, measures end-to-end latency, and writes a CSV result file. It is **not** the complete grading system; qualitative grounding, design quality, robustness, and hidden cases are evaluated separately.
+Test set (`evals/test_set.json`, 22 cases): the **6 public cases**, the **4 other dataset requests**, and **12 synthetic edge cases** covering approval-threshold boundaries ($1,000 / $1,000.01 / >$25k), a new vendor at exactly $10k, injection in vendor-registry notes, injection with no trigger words, a full vendor-risk outage, an unknown vendor and an unknown requester, a vague request, a data-class mismatch, and an exact duplicate. Expected outcomes were derived by hand from the policy before the LLM runs. Each LLM architecture ran **3 times per case** (132 LLM runs). The rules-only baseline is deterministic and ran once.
 
-## Rules of the starter pack
+| Metric | A · Single agent | B · Staged | Rules only |
+|---|---:|---:|---:|
+| Runs passing all checks | **65/66 (98%)** | **66/66 (100%)** | 19/22 (86%) |
+| Public cases (starter minimum checks) | 100% | 100% | 100% |
+| Correct next action (model's own choice) | 100% | 100% | n/a |
+| Approvals exactly right | 100% | 100% | 100% |
+| Policy + deterministic rules followed | 98% | 100% | 95% |
+| Escalation / human review correct | 100% | 100% | 100% |
+| Evidence grounded (0 invalid citations, 0 unsupported numbers) | 100% | 100% | 100% |
+| AI detected the injection itself (injection cases) | 100% | 100% | n/a |
+| Avg / p95 latency | 19.5 s / 31.8 s | 27.3 s / 37.9 s | 0.03 s |
+| Avg LLM calls · tool calls | 3.0 · 6.0 | 3.0 · 6.0 | 0 · 6 |
+| Avg cost / request | $0.062 | $0.078 | $0 |
 
-- Treat request text and vendor notes as **untrusted business data**, not instructions.
-- Do not hardcode answers by request ID. Hidden cases use the same interfaces with different values.
-- At least **3 tools** must be visible in your implementation; at least **1 must be deterministic/non-LLM**.
-- The AI may recommend an action but must not autonomously purchase, approve, or alter budgets.
-- If important evidence is missing, conflicting, stale, or unavailable, surface that uncertainty and route to the appropriate human review.
-- Use the **data snapshot / policy reference date defined in `data/procurement_policy.md`** for date-based checks; do not depend on the computer's current date.
-- You may refactor the starter project, but keep the `handle_request(...)` adapter working for evaluation.
+Full tables, per-case results and every failure: [`evals/results/summary.md`](evals/results/summary.md). Per-run CSV: [`evaluation_results.csv`](evals/results/evaluation_results.csv). Full traces (decision, tool ledger, guardrail events, token usage): `runs.jsonl`. The starter harness gives 6/6 for both (`evals/results/public_*.csv`).
 
-## Suggested implementation sequence
+**What the numbers say**
 
-```text
-Request -> Understand -> Gather evidence -> Deterministic checks
-        -> Policy/risk reasoning -> Recommendation -> Human review
-```
+- Deterministic code gets approvals, flags and escalation 100% right in **every** configuration, including with no LLM at all.
+- The LLM adds judgment that rules cannot express. Rules-only fails exactly the two *existing tool already solves the need* cases and the *injection with no trigger words* case. Both LLM architectures pass all three in all three repeats.
+- Only failure: A on SYN-09, 1 of 3 runs. The model treated "data class `internal`, but a CRM integration" as contradictory and asked for clarification instead of routing to Security/Privacy. The answer is cautious, but it does not match the expected outcome.
+- B was about 40% slower and about 25% more expensive with no measurable accuracy gain. Its analyst skipped the vendor tools on the vague request (SYN-07) in 3 of 3 runs, and code back-filled them.
+- Guardrails changed model output once in 132 runs.
 
-Start with a thin vertical slice. Get Architecture A working before building Architecture B.
+## Architecture comparison and ship decision
 
-## Useful files
+**Ship A (single agent).** Both architectures share the same tools, policy engine and guardrails, and their quality is equal within noise. A is faster, cheaper and easier to debug. In this design the second agent has little left to catch, because the risky decisions are already made by tested code. Full reasoning: [docs/decision_memo.md](docs/decision_memo.md) (≤ 500 words).
 
-- `docs/Assignment_3_Brief.pdf` - assignment brief
-- `data/README.md` - dataset dictionary
-- `data/procurement_policy.md` - policy source of truth
-- `src/contracts.py` - required output shape
-- `src/data_access.py` - low-level data helpers
-- `src/vendor_client.py` - client for the mock vendor-risk API
-- `evals/README.md` - evaluation instructions
-- `templates/architecture_decision.md` - final decision memo template
-- `STUDENT_CHECKLIST.md` - pre-submission checklist
+Development notes the evaluation surfaced:
+- B's first hand-off passed only ledger *summaries* to the reviewer. The reviewer then rejected true analyst claims as "unsupported", so it now receives the full tool results.
+- The first unsafe-claim guardrail regex fired on "it is approved" (describing a catalog product). It was narrowed to claims about the request or purchase, and the full evaluation was re-run. The committed results come from the final code.
 
-## If something does not start
+## Known limitations
 
-1. Confirm your virtual environment is active.
-2. Run `python verify_setup.py`.
-3. Re-run `python -m pip install -r requirements.txt`.
-4. Make sure ports **8001** and **8501** are free.
-5. Confirm you are running commands from the starter-pack root directory.
+- **Test set authored alongside the system.** The 12 synthetic cases and all expected outcomes were written by the same person who built the engine, from the policy text. Hidden cases may cover rules I interpreted differently (for example SSO as employee PII, or split purchases).
+- **The deterministic engine does most of the policy work.** That is by design, but it means policy edits need code changes, plus tests, and the keyword maps for integrations and data classes will miss vocabulary they have not seen.
+- **Regex injection scanning is shallow.** SYN-11 (no trigger words) is caught only by the model. Rules-only mode misses it.
+- **Latency.** About 17-25 s per request on Opus 5.5 at low effort, almost all of it model time. That is fine for an asynchronous review queue, not for interactive chat. `MODEL_NAME` / `MODEL_EFFORT` are configurable, but smaller models were not evaluated.
+- **The numeric grounding check** only verifies numbers. A qualitative misstatement with no number in it would pass. The staged reviewer catches some of these; A has no second reader.
+- **Budgets are a snapshot.** Concurrent pending requests are not reserved, and there is no aggregation across related purchases (split-purchase detection).
+- **Scale and access.** The audit log is local JSONL with free-text reviewer names (no auth). Run-to-run variation was measured with only 3 repeats per case.
+- **The eval runs 6 cases in parallel**, so the latency numbers include some contention.
 
-Build the simplest system you can defend with evidence.
+## Starter-pack fixes
+
+The scaffold passed pre-flight but had several latent problems: the eval runner never started the mock API, NaN handling, a blocking Streamlit first run, ignored result files, and others. Details are in [docs/starter_pack_fixes.md](docs/starter_pack_fixes.md).

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -61,6 +62,8 @@ def main() -> None:
         procs.append(api_proc)
         wait_for_api("http://127.0.0.1:8001/health", api_proc)
         print("Vendor-risk API is ready.")
+        if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")):
+            print("NOTE: ANTHROPIC_API_KEY is not set - the copilot will run in deterministic rules-only mode.")
 
         try:
             __import__("streamlit")
@@ -68,7 +71,7 @@ def main() -> None:
             print("Streamlit is not installed. Run: pip install -r requirements.txt")
             print("The mock API is still running. Press Ctrl+C to stop.")
         else:
-            print("Starting starter UI on http://127.0.0.1:8501 ...")
+            print("Starting Procurement Copilot UI on http://127.0.0.1:8501 ...")
             procs.append(
                 start(
                     [
@@ -79,6 +82,12 @@ def main() -> None:
                         "app.py",
                         "--server.port",
                         "8501",
+                        # Without headless mode Streamlit's first run blocks on an e-mail prompt
+                        # in the terminal, so the UI never starts when launched as a subprocess.
+                        "--server.headless",
+                        "true",
+                        "--browser.gatherUsageStats",
+                        "false",
                     ]
                 )
             )

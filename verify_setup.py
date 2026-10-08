@@ -17,6 +17,7 @@ REQUIRED_MODULES = [
     "dotenv",
     "streamlit",
     "httpx",
+    "anthropic",
 ]
 
 
@@ -142,7 +143,7 @@ def main() -> None:
     check_contract_and_evals()
     check_mock_api()
     print("\nPRE-FLIGHT PASSED")
-    print("Next: copy .env.example to .env, add your model credentials, then run: python run_local.py")
+    print("Next: add ANTHROPIC_API_KEY to .env (optional - rules-only mode works without it), then run: python run_local.py")
 
 
 if __name__ == "__main__":

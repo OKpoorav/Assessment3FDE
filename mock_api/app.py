@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException
 
@@ -19,7 +18,9 @@ def health() -> dict:
 
 @app.get("/vendor-risk/{vendor_name}")
 def vendor_risk(vendor_name: str) -> dict:
-    name = unquote(vendor_name)
+    # FastAPI has already percent-decoded the path parameter; decoding again (as the starter
+    # did) corrupts names that legitimately contain '%'.
+    name = vendor_name
     record = DATA.get(name)
     if record is None:
         raise HTTPException(status_code=404, detail=f"No vendor-risk record for '{name}'")

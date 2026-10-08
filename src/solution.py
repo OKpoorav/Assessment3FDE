@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from src.contracts import Architecture, ProcurementDecision
+from src.copilot import run_copilot
 
 
 def handle_request(request_id: str, architecture: Architecture = "single") -> ProcurementDecision:
-    """Assessment adapter.
+    """Assessment adapter used by the public/hidden evaluation harness.
 
-    Keep this function callable by the public/hidden evaluation harness.
-    Your internal implementation may use any framework, modules, agents, tools,
-    deterministic checks, or orchestration strategy.
+    ``architecture`` is "single" (Architecture A) or "staged" (Architecture B).
+    Without LLM credentials, or if the model call fails, both fall back to the
+    deterministic rules path and add the ``ai_assist_unavailable`` risk flag.
     """
-    raise NotImplementedError(
-        "Implement handle_request(...) as part of Assessment 3. "
-        "Return a ProcurementDecision-compatible object."
-    )
+    return run_copilot(request_id, architecture).decision
